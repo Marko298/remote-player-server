@@ -4,16 +4,17 @@ const app = express();
 const path = require("path");
 const server = require("http").createServer(app);
 const port = process.env.PORT || 4000;
+const emoji = require("./emoji");
 
 const io = require("socket.io")(server, {
   cors: {
-    origin: "http://localhost:8080",
+    origin: "http://192.168.1.169:8080",
     methods: ["GET", "POST"],
     credentials: true,
   },
 });
 
-server.listen(port, () => {
+server.listen(port, "0.0.0.0", () => {
   console.log("Server listening at port %d", port);
 });
 
@@ -21,30 +22,39 @@ server.listen(port, () => {
 app.use(cors());
 app.use(express.static(path.join(__dirname, "public")));
 
+function random(min, max) {
+  min = Math.ceil(min);
+  max = Math.floor(max);
+  return Math.floor(Math.random() * (max - min) + min);
+}
+
+const randomEmoji = () => emoji[random(0, emoji.length - 1)];
+
+let deviceNumber = 0;
 let sockets = {};
 let devices = [];
 let master = null;
 let state = null;
 
-function forward(socket, event) {
-  socket.on(event, (data) => {
-    console.log("Event: " + event + " data: " + JSON.stringify(data));
-
-    return socket.broadcast.emit(event, data);
-  });
-}
-
 io.on("connection", (socket) => {
-  socket.on("switchMaster", (uuid) => {
-    const newMaster = devices.find(({ id }) => id === uuid);
+  let deviceUuid;
+
+  socket.on("switchMaster", (newMasterId) => {
+    const newMaster = devices.find(({ id }) => id === newMasterId);
 
     if (!newMaster) {
-      console.error("Failed to find device: " + uuid);
-    } else {
-      console.log("Switching to master: " + uuid);
+      console.error("Failed to find device: " + newMasterId);
+      return;
     }
 
-    io.emit("masterChanged", newMaster);
+    master = newMasterId;
+
+    console.log("Switching to master: " + newMasterId);
+
+    const masterSocket = sockets[newMasterId];
+
+    masterSocket.broadcast.emit("masterChanged", newMaster);
+    masterSocket.emit("nominatedAsMaster", state);
   });
 
   socket.on("fetchState", () => {
@@ -62,11 +72,22 @@ io.on("connection", (socket) => {
     );
   });
 
-  socket.on("stateChanged", (newState) => {
-    if (socket.id === master) {
-      state = newState;
-      socket.broadcast.emit("stateChanged", newState);
+  socket.on("checkIfMaster", () => {
+    if (deviceUuid !== master) {
+      return;
     }
+
+    socket.emit("nominatedAsMaster", state);
+  });
+
+  socket.on("stateChanged", (newState) => {
+    // console.log("Received state from: " + deviceUuid);
+
+    if (deviceUuid !== master) return;
+
+    // console.log("Updating state from: " + deviceUuid);
+    state = newState;
+    socket.broadcast.emit("stateChanged", newState);
   });
 
   socket.on("command", ({ command, payload }) => {
@@ -87,24 +108,14 @@ io.on("connection", (socket) => {
   socket.on("announce", (uuid) => {
     console.log("Device announced: " + uuid);
 
-    socket.id = uuid;
+    deviceUuid = uuid;
 
     if (devices.find(({ id }) => id === uuid)) {
       console.error("Duplicated device: " + uuid);
       return;
     }
 
-    if (!master) {
-      console.log("No master device found. Setting new master: " + uuid);
-      master = uuid;
-    }
-
     sockets[uuid] = socket;
-
-    devices.push({
-      id: uuid,
-      name: "Device #" + devices.length,
-    });
 
     socket.emit("registered", {
       master,
@@ -112,23 +123,63 @@ io.on("connection", (socket) => {
       state,
     });
 
-    socket.broadcast.emit("deviceListChanged", devices);
+    devices.push({
+      id: deviceUuid,
+      name: "Device " + randomEmoji(),
+    });
 
-    io.emit("masterChanged", master);
+    io.emit("deviceListChanged", devices);
+
+    if (!master) {
+      console.log("No master device found. Setting new master: " + deviceUuid);
+      master = deviceUuid;
+    }
+
+    socket.emit("nominatedAsMaster", false);
   });
 
+  // socket.on("ready", () => {
+  //   devices.push({
+  //     id: deviceUuid,
+  //     name: randomEmoji(),
+  //   });
+  //
+  //   io.emit("deviceListChanged", devices);
+  //
+  //   if (!master) {
+  //     console.log("No master device found. Setting new master: " + deviceUuid);
+  //     master = deviceUuid;
+  //   }
+  // });
+
   socket.on("disconnect", () => {
-    console.log("Socket closed: " + socket.id);
+    if (!deviceUuid) return;
 
-    delete socket[socket.id];
+    console.log("Device disconnected: " + deviceUuid);
 
-    devices = devices.filter(({ id }) => id !== socket.id);
+    delete socket[deviceUuid];
 
-    if (master === socket.id) {
-      const newDevice = devices.find(Boolean);
-      master = newDevice?.id;
+    devices = devices.filter(({ id }) => id !== deviceUuid);
 
-      io.emit("masterChanged", master);
+    if (master === deviceUuid) {
+      const newMaster = devices.find(Boolean);
+
+      state = null;
+
+      if (!newMaster) {
+        console.log("No devices left. Master is empty");
+        master = null;
+        return;
+      }
+
+      master = newMaster.id;
+
+      console.log("Setting new master: " + master);
+
+      const masterSocket = sockets[master];
+
+      masterSocket.broadcast.emit("masterChanged", newMaster);
+      masterSocket.emit("nominatedAsMaster", false);
     }
 
     io.emit("deviceListChanged", devices);

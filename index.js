@@ -53,7 +53,7 @@ io.on("connection", (socket) => {
 
     const masterSocket = sockets[newMasterId];
 
-    masterSocket.broadcast.emit("masterChanged", newMaster);
+    masterSocket.broadcast.emit("masterChanged", { master, state });
     masterSocket.emit("nominatedAsMaster", state);
   });
 
@@ -66,10 +66,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("fetchMaster", () => {
-    socket.emit(
-      "masterChanged",
-      devices.find(({ id }) => id === master)
-    );
+    socket.emit("masterChanged", { master, state });
   });
 
   socket.on("checkIfMaster", () => {
@@ -178,7 +175,7 @@ io.on("connection", (socket) => {
 
       const masterSocket = sockets[master];
 
-      masterSocket.broadcast.emit("masterChanged", newMaster);
+      masterSocket.broadcast.emit("masterChanged", { master, state });
       masterSocket.emit("nominatedAsMaster", false);
     }
 
